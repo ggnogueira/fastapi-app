@@ -28,3 +28,10 @@ Autenticação usando JWT. Fazendo instalação das dependecias.
 # Passo 7.
 Instalando algoritmo para criptografia das senhas.
 `pip install "passlib[bcrypt]"`
+
+# Passo 8.
+Para criar o banco de dados é necessário executar o seguinte comando dentro do python.
+```py
+import services
+services.create_database()
+```

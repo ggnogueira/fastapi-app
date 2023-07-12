@@ -1,14 +1,17 @@
 # Arquivo contendo as funções de serviço.
 # Autenticação, criação de token e etc.
 
-import schemas as _schemas
+import schemas as _schemas, models as _models, database as _database
 
 from typing import Annotated
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+
 from datetime import datetime, timedelta
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import Depends, HTTPException, status
+from passlib.context import CryptContext
+
+from sqlalchemy.orm import Session
 
 # to get a string like this run:
 # openssl rand -hex 32
@@ -16,39 +19,47 @@ SECRET_KEY = "cfc815eabd4982df1bc5ef0407d0ae0c211c2189f0f8d5aaadd257dd8e45d824"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-fake_users_db = {
-    "johndoe": {
-        "username": "johndoe",
-        "full_name": "John Doe",
-        "email": "johndoe@example.com",
-        "hashed_password": "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",
-        "disabled": False,
-    }
-}
-
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/token")
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+def create_database():
+    return _database.Base.metadata.create_all(bind=_database.engine)
+
+def get_db():
+    db = _database.SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 def get_password_hash(password):
     return pwd_context.hash(password)
 
-def get_user(db, username: str):
-    if username in db:
-        user_dict = db[username]
-        return _schemas.UserInDB(**user_dict)
-    
-def authenticate_user(fake_db, username: str, password: str):
-    user = get_user(fake_db, username)
+async def get_user(db: Session, user_id: int):
+    return db.query(_models.User).filter(_models.User.id == user_id).first()
+
+async def get_user_by_username(db: Session, username: str):
+    return db.query(_models.User).filter(_models.User.username == username).first()
+
+async def create_user(user: _schemas.UserCreate, db: Session):
+    user_obj = _models.User(
+        username=user.username,
+        hashed_password=get_password_hash(user.hashed_password)
+    )
+    db.add(user_obj)
+    db.commit()
+    db.refresh(user_obj)
+    return user_obj
+
+async def authenticate_user(db: Session, username: str, password: str):
+    user = await get_user_by_username(db, username)
     if not user:
         return False
-    if not verify_password(password, user.hashed_password):
+    if not user.verify_password(password):
         return False
     return user
 
-def create_access_token(data: dict, expires_delta: timedelta | None = None):
+async def create_access_token(data: dict, expires_delta: timedelta | None = None):
     to_encode = data.copy()
     if expires_delta:
         expire = datetime.utcnow() + expires_delta
@@ -58,29 +69,20 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            raise credentials_exception
-        token_data = _schemas.TokenData(username=username)
-    except JWTError:
-        raise credentials_exception
-    user = get_user(fake_users_db, username=token_data.username)
-    if user is None:
-        raise credentials_exception
-    return user
-
-async def get_current_active_user(
-    current_user: Annotated[_schemas.User, Depends(get_current_user)]
+async def get_current_user(
+        token: Annotated[str, Depends(oauth2_scheme)],
+        db: Annotated[Session, Depends(get_db)]
 ):
-    if current_user.disabled:
-        raise HTTPException(status_code=400, detail="Inactive user")
-    return current_user
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=ALGORITHM)
+        user = await get_user_by_username(db, payload["sub"])
+    except:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid Email or Password"
+        )
+    return _schemas.User.from_orm(user)
 
+async def get_addresses(db: Session, user: _schemas.User):
+    addresses = db.query(_models.Address).filter_by(owner_id = user.id)
+    return list(map(_schemas.Address.from_orm, addresses))
